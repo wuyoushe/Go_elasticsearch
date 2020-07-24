@@ -1,0 +1,70 @@
+<html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="X-UA-Compatible" content="ie=edge">
+        <title>{{.title}}</title>
+        <script src="https://cdn.staticfile.org/jquery/1.10.2/jquery.min.js"></script>
+    </head>
+        <body>
+            <div class="search-input-wrap clearfix">
+                <div class="form-input-wrap f-l">
+                    <form action="" class="input-kw-form">
+                        <input type="search" autocomplete="off" name="baike-search" placeholder="请输入关键词" value="{{.title}}" class="input-kw">
+                    </form>
+                    <i class="iconfont if-message"></i>
+                    <i class="iconfont if-close"></i>
+                </div>
+                <i class="search-cancel f-l">取消</i>
+            </div>
+            标题 {{.title}}
+            <div class="course">
+                <h3>搜索结果</h3>
+                <span class="time"></span>
+                <ul class="course_list">
+                    
+                </ul>
+            </div>
+        </body>
+
+        <input type="hidden" class="title" value="{{.title}}">
+
+    <script>
+        $(document).ready(function() {
+            console.log('hello')
+            var title = $('.title').val();
+            console.log(title);
+            //var url = "http://localhost:8080/select/course/" + title
+            var base_url = "http://localhost:9200/course/_search?pretty=true&q=title:"+title
+            $.ajax({
+                url: base_url,
+                dataType: 'JSON',
+                success: function (data, status) {
+                    let course = JSON.stringify(data);
+                    //解析json获取里面的值
+                    var json = eval("("+course+")");
+
+                    $(".time").append('耗时:'+ json.took +'毫秒');
+                    
+                    console.log(json.hits.hits);
+                    var html = ''
+                    $.each(json.hits.hits, function (i,n) {
+                        console.log(n._id)
+                        console.log(n._source.title)
+                        html += '<li data-id="'+n._id+'">'+n._source.title+'</li>';
+                    });
+                    $(".course_list").append(html);
+                },
+                error: function (result) {
+                    console.log('请求失败');
+                },
+                complete: function () {
+                    console.log('请求完成');
+                }
+            
+                
+                });
+        })
+        
+    </script>
+</html>
