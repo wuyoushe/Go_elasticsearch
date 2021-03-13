@@ -1,0 +1,54 @@
+func AggsSendMessage(p *pb.AggsSendMessageRq) (items *pb.AggsMessageItemRp, err error) {
+    ctx := context.Background()
+    costAgg := elastic.NewSumAggregation().Field("cost") // 将cost求和
+    s := client.Search().
+        Index(sendMessage.IndexName()).
+        Index(sendMessage.IndexName())
+    da := elastic.NewDateHistogramAggregation().
+        Interval(p.Interval).
+        Field("created_at").
+        TimeZone("+08:00").
+        MinDocCount(0).
+        SubAggregation("cost", costAgg) // 聚合查询子查询条件
+    query := elastic.NewRangeQuery("created_at")
+    if p.StartTime != 0 {
+        query.Gte(p.StartTime)
+    }
+    if p.EndTime != 0 {
+        query.Lte(p.EndTime)
+    }
+     // 此id区分各个服务商的id，用于做查询筛选的条件
+    if p.ServiceId != 0 {
+        s.Query(elastic.NewTermQuery("service_id", p.ServiceId))
+    }
+
+    result, err := s.
+        Query(query).
+        Size(0).
+        Aggregation("data", da).
+        Do(ctx)
+    if err != nil {
+        err = errors.NewCodere(500, err, "聚合短信错误")
+        return
+    }
+    d, err := json.Marshal(result)
+    log.Printf("josn is: %s", d)
+    // 把数据反序列化到bs结构里面
+    bs := &DateBuckets{}
+    err = bs.UnMarshal(result.Aggregations["data"])
+    if err != nil {
+        err = errors.NewCodere(500, err, "聚合短信错误")
+        return
+    }
+    items = &pb.AggsMessageItemRp{}
+    // key是代表月份的时间戳,DocCount代表当前key(月份)聚合出来的数量统计
+    items.Item = make([]*pb.AggsMessageItem, len(bs.Buckets))
+    for i, v := range bs.Buckets {
+        items.Item[i] = &pb.AggsMessageItem{
+            Time:  v.Key,
+            Count: v.DocCount,
+            Money: int64(v.Cost.Value),
+        }
+    }
+    return
+}

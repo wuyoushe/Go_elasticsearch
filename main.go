@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -17,21 +18,41 @@ import (
 	"github.com/elastic/go-elasticsearch/v6/esapi"
 	"github.com/gin-gonic/gin"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/tidwall/gjson"
+	"github.com/olivere/elastic/v6"
+	"gopkg.in/go-playground/validator.v9"
+	"gopkg.in/ini.v1"
 )
 
 var (
 	es *elasticsearch.Client
 	r  map[string]interface{}
+	//配置信息
+	iniFile *ini.File
+
+	//elastic的连接
+	client   *elastic.Client
+	validate *validator.Validate
+	host     string
 )
 
 func init() {
 	var err error
+	//加载配置文件
+	file, e := ini.Load("conf/app.ini")
+
+	if e != nil {
+		checkErr(e)
+	}
+	iniFile = file
+	//读取配置的开发模式
+	RunMode := iniFile.Section("").Key("app_mode").String()
+	//直接通过函数拼接获取对应模块的url
+	host = iniFile.Section(RunMode).Key("host").String()
+	fmt.Println(host)
+
 	config := elasticsearch.Config{}
-	config.Addresses = []string{"http://127.0.0.1:9200"}
+	config.Addresses = []string{host}
 	es, err = elasticsearch.NewClient(config)
-	// es, _ := elasticsearch.NewDefaultClient()
-	// log.Println(es.Info())
 	fmt.Println("连接es成功")
 	checkErr(err)
 
@@ -42,9 +63,30 @@ func init() {
 
 	defer res.Body.Close()
 	log.Println(res)
+
+	//通过elastic连接
+	errorlog := log.New(os.Stdout, "APP", log.LstdFlags)
+	var err2 error
+	client, err = elastic.NewClient(elastic.SetSniff(false), elastic.SetErrorLog(errorlog), elastic.SetURL(host))
+	if err != nil {
+		panic(err2)
+	}
+	info, code, err := client.Ping(host).Do(context.Background())
+	if err != nil {
+		panic(err2)
+	}
+	fmt.Printf("Elasticsearch returned with code %d and version %s\n", code, info.Version.Number)
+
+	esversion, err := client.ElasticsearchVersion(host)
+	if err != nil {
+		panic(err2)
+	}
+	fmt.Printf("Elasticsearch version %s\n", esversion)
 }
 
 func main() {
+	//注册路由 router := routers.InitRouter()
+
 	r := gin.Default()
 	r.GET("/ping", func(c *gin.Context) {
 		c.JSON(200, gin.H{
@@ -58,6 +100,7 @@ func main() {
 	})
 
 	r.GET("/search", search)
+	r.GET("/searchbak", searchBak)
 	r.GET("/add/index", Add)
 	r.GET("/create_index", createIndex)
 	r.GET("/delete_index", deleteIndex)
@@ -70,10 +113,223 @@ func main() {
 	r.GET("/select/by/search", selectBySearch)
 	r.GET("/select/course/:title", selectCourse)
 
+	//通过elastic连接的查询
+	r.GET("/query/:title", Query)
+	r.GET("/back/query", BackQuery)
+
 	//导入数据到es
 	r.GET("/insert/course/batch", insertCourseBatch)
 
 	r.Run() // listen and serve on 0.0.0.0:8080 (for windows "localhost:8080")
+}
+
+type filterType int
+
+const (
+	FILTER_TYPE_TERM filterType = iota
+	FILTER_TYPE_RANGE
+)
+
+type CommonFilter struct {
+	FilterType  filterType
+	FilterName  string
+	FilterField string
+	FilterValue []interface{}
+}
+
+//搜索请求参数
+type HightLight struct {
+	HighlightFields   []string // 列表字段匹配到了关键字则高亮返回，匹配的字词用 HighlightPostTags，HighlightPreTags包裹
+	HighlightPostTags string
+	HighlightPreTags  string
+}
+
+// 搜索请求参数
+type CommonSearch struct {
+	Index      string             `json:"Index" validate:"required"` // es 索引
+	SearchKey  string             // 模糊搜索词
+	FieldBoost map[string]float64 // 搜索限定字段及权重, 为空时搜索所有字段，权重默认为 1.0
+	Analyzer   string             // 默认 standard
+	SortFields map[string]string  // 排序 field -> desc/asc
+	Page       int                `json:"Page" validate:"gt=0"`
+	PageSize   int                `json:"PageSize" validate:"gt=0"`
+	Filters    []*CommonFilter
+	*HightLight
+}
+
+//搜索
+func Query(c *gin.Context) {
+	var res *elastic.SearchResult
+	var err error
+	//取所有
+	//res, err = client.Search("course").Type("doc").Do(context.Background())
+
+	title := c.Param("title")
+
+	MatchPhraseQuery1 := elastic.NewMatchQuery("title", title).Operator("and")
+	res, err = client.Search("course").Type("doc").Sort("createdTime", false).Size(20).Query(MatchPhraseQuery1).Do(context.Background())
+
+	//短语搜索 搜索about字段中有 rock climbing
+	// matchPhraseQuery := elastic.NewMatchPhraseQuery("title", title)
+	// res, err = client.Search("course").Type("doc").Query(matchPhraseQuery).Do(context.Background())
+
+	checkErr(err)
+	c.JSON(200, res)
+
+}
+
+func BackQuery(c *gin.Context) {
+	var res *elastic.SearchResult
+	var err error
+
+	//title := c.Param("title")
+	title := c.DefaultQuery("title", "")
+
+	subtitle := c.DefaultQuery("subtitle", "")
+
+	if subtitle != "" {
+		MatchPhraseQuery1 := elastic.NewMatchQuery("subtitle", subtitle).Operator("and")
+		//res, err = client.Search("course_all").Type("back").Query(MatchPhraseQuery1).Do(context.Background())
+		res, err = client.Search("course_all").Type("doc").Query(MatchPhraseQuery1).Do(context.Background())
+	} else if title != "" {
+		MatchPhraseQuery1 := elastic.NewMatchQuery("title", title).Operator("and")
+		//res, err = client.Search("course_all").Type("back").Query(MatchPhraseQuery1).Do(context.Background())
+		res, err = client.Search("course_all").Type("doc").Sort("createdTime", false).Size(20).Query(MatchPhraseQuery1).Do(context.Background())
+
+	}
+
+	checkErr(err)
+	c.JSON(200, res)
+
+}
+
+type Search struct {
+	id         int
+	categoryId int
+	title      string
+}
+
+func (r *CommonSearch) Search() (result *elastic.SearchResult, err error) {
+	if err = validate.Struct(r); err != nil {
+		return
+	}
+
+	boolQuery := r.getBoolQuery()
+
+	search := client.Search(r.Index).Query(boolQuery)
+
+	if sorters := getSorters(r.SortFields); sorters != nil {
+		search.SortBy(sorters...)
+	}
+	if highlight := getHighlight(r.HightLight); highlight != nil {
+		search.Highlight(highlight)
+	}
+
+	offset := (r.Page - 1) * r.PageSize
+	resp, err := search.From(offset).Size(r.PageSize).Do(context.Background())
+
+	if err != nil {
+		return
+	}
+	return resp, nil
+}
+
+func (r *CommonSearch) getBoolQuery() *elastic.BoolQuery {
+	boolQuery := elastic.NewBoolQuery()
+
+	if match := getMatch(r.SearchKey, r.Analyzer, r.FieldBoost); match != nil {
+		boolQuery.Must(match)
+	}
+	if filters := getFilters(r.Filters); filters != nil {
+		boolQuery.Filter(filters...)
+	}
+	return boolQuery
+}
+
+// 模糊匹配
+func getMatch(searchKey string, analyzer string, fieldBoost map[string]float64) elastic.Query {
+	if fieldBoost == nil || len(fieldBoost) <= 0 {
+		return nil
+	}
+
+	match := elastic.NewMultiMatchQuery(searchKey)
+	// 字段查询权重设置
+	for f, b := range fieldBoost {
+		match.FieldWithBoost(f, b)
+	}
+	if analyzer != "" && len(analyzer) > 0 {
+		match.Analyzer(analyzer)
+	}
+	return match
+}
+
+// 排序设置
+func getSorters(sortFields map[string]string) []elastic.Sorter {
+	if sortFields == nil || len(sortFields) <= 0 {
+		return nil
+	}
+	sorters := make([]elastic.Sorter, 0)
+	for f, s := range sortFields {
+		fs := elastic.NewFieldSort(f)
+		if strings.ToLower(s) == "desc" {
+			fs.Desc()
+		} else {
+			fs.Asc()
+		}
+		sorters = append(sorters, fs)
+	}
+	return sorters
+}
+
+// 过滤条件
+func getFilters(filters []*CommonFilter) []elastic.Query {
+	if filters == nil || len(filters) <= 0 {
+		return nil
+	}
+	var querys = make([]elastic.Query, 0)
+	for _, fl := range filters {
+		filter := getFilter(fl)
+		if filter == nil {
+			continue
+		}
+		querys = append(querys, filter)
+	}
+	return querys
+}
+
+func getFilter(filter *CommonFilter) elastic.Query {
+	if len(filter.FilterValue) <= 0 {
+		log.Printf("filterField[%s] - filterValue is null.", filter.FilterField)
+		return nil
+	}
+	switch filter.FilterType {
+	case FILTER_TYPE_TERM:
+		return elastic.NewTermsQuery(filter.FilterField, filter.FilterValue...)
+	case FILTER_TYPE_RANGE:
+		rangeQuery := elastic.NewRangeQuery(filter.FilterField)
+		if len(filter.FilterValue) == 1 {
+			rangeQuery.Gte(filter.FilterValue[0])
+		} else if len(filter.FilterValue) == 2 {
+			rangeQuery.Gte(filter.FilterValue[0]).Lte(filter.FilterValue[1])
+		}
+		return rangeQuery
+	}
+	return nil
+}
+
+// 高亮设置
+func getHighlight(hightlight *HightLight) *elastic.Highlight {
+	if hightlight == nil {
+		return nil
+	}
+	hlfs := make([]*elastic.HighlighterField, 0)
+	for _, f := range hightlight.HighlightFields {
+		hl := elastic.NewHighlighterField(f)
+		hlfs = append(hlfs, hl)
+	}
+	hl := elastic.NewHighlight().Fields(hlfs...).
+		PreTags(hightlight.HighlightPreTags).PostTags(hightlight.HighlightPostTags)
+	return hl
 }
 
 func checkErr(err error) {
@@ -116,14 +372,13 @@ func search(c *gin.Context) {
 	jsonBody, _ := json.Marshal(query)
 
 	req := esapi.SearchRequest{
-		Index:        []string{"test_index"},
-		DocumentType: []string{"test_type"},
+		Index:        []string{"course"},
+		DocumentType: []string{"doc"},
 		Body:         bytes.NewReader(jsonBody),
 	}
 	res, err := req.Do(context.Background(), es)
 	checkErr(err)
 	defer res.Body.Close()
-	fmt.Println(res.String())
 	c.JSON(200, req)
 }
 
@@ -134,7 +389,7 @@ func searchBak(c *gin.Context) {
 	query := map[string]interface{}{
 		"query": map[string]interface{}{
 			"match": map[string]interface{}{
-				"title": "test",
+				"title": "遴选",
 			},
 		},
 	}
@@ -144,7 +399,7 @@ func searchBak(c *gin.Context) {
 
 	res, err := es.Search(
 		es.Search.WithContext(context.Background()),
-		es.Search.WithIndex("test"),
+		es.Search.WithIndex("course"),
 		es.Search.WithBody(&buf),
 		es.Search.WithTrackTotalHits(true),
 		es.Search.WithPretty(),
@@ -436,46 +691,32 @@ func deleteByQuery(c *gin.Context) {
 }
 
 func selectBySearch(c *gin.Context) {
-	query := map[string]interface{}{
-		"query": map[string]interface{}{
-			"bool": map[string]interface{}{
-				"filter": map[string]interface{}{
-					"range": map[string]interface{}{
-						"num": map[string]interface{}{
-							"gt": 0,
-						},
-					},
-				},
-			},
-		},
-		"size": 0,
-		"aggs": map[string]interface{}{
-			"num": map[string]interface{}{
-				"terms": map[string]interface{}{
-					"field": "num",
-					//"size":  1,
-				},
-				"aggs": map[string]interface{}{
-					"max_v": map[string]interface{}{
-						"max": map[string]interface{}{
-							"field": "v",
-						},
-					},
-				},
-			},
-		},
-	}
-	jsonBody, _ := json.Marshal(query)
+	url := "http://116.62.107.108:9200/course/_search"
+	query := []byte(`{
+            "query":{
+                "bool": {
+                    "should": [
+                    {"match": {"title": "遴选"}},
+                    ]
+                }
+            }
+            }`)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(query))
+	req.Header.Set("Content-Type", "application/json")
 
-	req := esapi.SearchRequest{
-		Index:        []string{"course"},
-		DocumentType: []string{"course_type"},
-		Body:         bytes.NewReader(jsonBody),
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		panic(err)
 	}
-	res, err := req.Do(context.Background(), es)
-	checkErr(err)
-	defer res.Body.Close()
-	fmt.Println(res.String())
+	defer resp.Body.Close()
+	fmt.Println(resp.Body)
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("%s", string(body))
 }
 
 func selectCourse(c *gin.Context) {
@@ -506,10 +747,6 @@ func selectCourse(c *gin.Context) {
 	checkErr(err)
 	defer res.Body.Close()
 
-	var json = `{"foo":{"bar":"BAZ"}}`
-	gjson.Get(json, "foo.bar")
-
-	//fmt.Println(res.String())
 	c.JSON(200, res.String())
 }
 

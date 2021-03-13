@@ -11,7 +11,10 @@ require (
 	github.com/google/go-cmp v0.5.1 // indirect
 	github.com/mailru/easyjson v0.7.1 // indirect
 	github.com/olivere/elastic v6.2.34+incompatible
+	github.com/olivere/elastic/v6 v6.2.1
 	// github.com/olivere/elastic v6.2.34+incompatible
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/tidwall/gjson v1.6.0
+	gopkg.in/go-playground/validator.v9 v9.31.0
+	gopkg.in/ini.v1 v1.61.0
 )
